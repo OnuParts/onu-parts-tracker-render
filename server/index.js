@@ -46,7 +46,9 @@ app.get('/api/health', (req, res) => {
 
 // Serve login page
 app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'login.html'));
+  const loginPath = path.join(__dirname, '..', 'public', 'login.html');
+console.log('Looking for login.html at:', loginPath);
+res.sendFile(loginPath);
 });
 
 // Root route redirects to login
