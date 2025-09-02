@@ -26,6 +26,13 @@ app.use(express.urlencoded({ extended: true }));
 
 // Serve static files (CSS, JS, images)
 app.use(express.static(path.join(__dirname, '..', 'public')));
+// Set correct content type for HTML files
+app.use((req, res, next) => {
+  if (req.path.endsWith('.html')) {
+    res.set('Content-Type', 'text/html');
+  }
+  next();
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
