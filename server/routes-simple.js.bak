@@ -1,0 +1,125 @@
+const express = require('express');
+const { pool } = require('./db');
+const { generateSimpleExcel } = require('./excel-simple');
+
+// Create a router for simple exports
+const simpleRouter = express.Router();
+
+// Simple Excel export endpoint that will 100% work
+simpleRouter.get('/api/simple-export', async (req, res) => {
+  try {
+    // Get params
+    const month = req.query.month;
+    const type = req.query.type || 'all';
+    
+    console.log(`Simple Excel Export: month=${month}, type=${type}`);
+    
+    if (!month) {
+      return res.status(400).send('Month parameter is required');
+    }
+    
+    // Parse the month string to create date range
+    const [monthNum, yearNum] = month.split('/').map(n => parseInt(n));
+    const startDate = new Date(yearNum, monthNum - 1, 1);
+    const endDate = new Date(yearNum, monthNum, 0, 23, 59, 59, 999);
+    
+    // Arrays to hold our data
+    let issuances = [];
+    let deliveries = [];
+    
+    // Get issuance data if needed
+    if (type === 'all' || type === 'chargeouts') {
+      const issuanceResult = await pool.query(`
+        SELECT 
+          pi.id,
+          pi.issued_at,
+          p.name as part_name,
+          p.part_id as part_number,
+          pi.quantity,
+          p.unit_cost,
+          b.name as building_name,
+          cc.code as cost_center_code,
+          'Charge-Out' as type
+        FROM parts_issuance pi
+        LEFT JOIN parts p ON pi.part_id = p.id
+        LEFT JOIN buildings b ON pi.building_id = b.id
+        LEFT JOIN cost_centers cc ON b.cost_center_id = cc.id
+        WHERE pi.issued_at BETWEEN $1 AND $2
+        ORDER BY pi.issued_at DESC
+      `, [startDate.toISOString(), endDate.toISOString()]);
+      
+      issuances = issuanceResult.rows || [];
+    }
+    
+    // Get delivery data if needed
+    if (type === 'all' || type === 'deliveries') {
+      const deliveryResult = await pool.query(`
+        SELECT 
+          pd.id,
+          pd.delivered_at as issued_at,
+          p.name as part_name,
+          p.part_id as part_number,
+          pd.quantity,
+          p.unit_cost,
+          b.name as building_name,
+          cc.code as cost_center_code,
+          'Delivery' as type
+        FROM parts_delivery pd
+        LEFT JOIN parts p ON pd.part_id = p.id
+        LEFT JOIN buildings b ON pd.building_id = b.id
+        LEFT JOIN cost_centers cc ON pd.cost_center_id = cc.id
+        WHERE pd.delivered_at BETWEEN $1 AND $2
+        ORDER BY pd.delivered_at DESC
+      `, [startDate.toISOString(), endDate.toISOString()]);
+      
+      deliveries = deliveryResult.rows || [];
+    }
+    
+    console.log(`Simple Export: Found ${issuances.length} issuances and ${deliveries.length} deliveries`);
+    
+    // Process the data to match our expected format
+    const data = [...issuances, ...deliveries].map(item => {
+      // Format date
+      const date = new Date(item.issued_at);
+      const formattedDate = `${date.getMonth()+1}/${date.getDate()}/${date.getFullYear()}`;
+      
+      // Calculate extended price
+      const unitCost = parseFloat(item.unit_cost || 0);
+      const quantity = parseInt(item.quantity || 0);
+      const extendedPrice = unitCost * quantity;
+      
+      return {
+        date: formattedDate,
+        partName: item.part_number || '',        // Set partName to Part Number
+        description: item.part_name || '',       // Set description to Part Name (description)
+        quantity,
+        unitCost: unitCost ? `$${unitCost.toFixed(2)}` : '$0.00',
+        extendedPrice: `$${extendedPrice.toFixed(2)}`,
+        building: item.building_name || '',
+        costCenter: item.cost_center_code || '',
+        type: item.type || ''
+      };
+    });
+    
+    // Determine report type for filename
+    let reportType = 'Parts';
+    if (type === 'deliveries') reportType = 'Deliveries';
+    if (type === 'chargeouts') reportType = 'Charge-Outs';
+    
+    // Generate Excel file
+    const buffer = generateSimpleExcel(data, month, reportType);
+    
+    // Send response
+    const filename = `ONU-${reportType}-Report-${month.replace('/', '-')}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.end(buffer);
+    
+  } catch (error) {
+    console.error('Simple export error:', error);
+    res.status(500).send('Export failed: ' + (error.message || 'Unknown error'));
+  }
+});
+
+module.exports = simpleRouter;
