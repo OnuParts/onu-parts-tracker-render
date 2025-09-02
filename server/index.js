@@ -107,6 +107,26 @@ async function initDatabase() {
   }
 }
 
+// Authentication endpoint
+app.post('/api/login', (req, res) => {
+  const { username, password, role } = req.body;
+  
+  // Simple authentication
+  if (username === 'admin' && password === 'admin') {
+    res.json({ 
+      success: true, 
+      user: { username: 'admin', role: 'admin', name: 'Michael Gierhart' },
+      redirectTo: '/dashboard' 
+    });
+  } else {
+    res.status(401).json({ success: false, error: 'Invalid credentials' });
+  }
+});
+// Current user endpoint  
+app.get('/api/current-user', (req, res) => {
+  res.json({ username: 'admin', role: 'admin', name: 'Michael Gierhart' });
+});
+
 // Initialize database and start server
 initDatabase().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
