@@ -1,26 +1,24 @@
-// Simple starter for Render deployment
-const path = require('path');
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 // Set up environment
-require('dotenv').config();
+process.env.NODE_ENV = 'production';
 
 // Auto-import database if needed
-const { importDatabase } = require('./auto-import-database.js');
-
-async function start() {
-  console.log('Starting ONU Parts Tracker...');
-  
-  // Try to import database first
-  const dbImported = await importDatabase();
-  if (!dbImported) {
-    console.log('Continuing without database import...');
-  }
-  
+import('./auto-import-database.js').then(() => {
+  console.log('Database import check complete');
   // Start the main server
-  require('./server/index.js');
-}
-
-start().catch(err => {
-  console.error('Startup failed:', err);
-  process.exit(1);
+  import('./server/index.js').then(() => {
+    console.log('ONU Parts Tracker started successfully');
+  }).catch(err => {
+    console.error('Server startup failed:', err);
+    process.exit(1);
+  });
+}).catch(err => {
+  console.log('Continuing without database import...');
+  // Start server anyway
+  import('./server/index.js').catch(err => {
+    console.error('Startup failed:', err);
+    process.exit(1);
+  });
 });
