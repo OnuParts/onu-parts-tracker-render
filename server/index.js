@@ -134,6 +134,11 @@ app.get('/api/current-user', (req, res) => {
   res.json({ username: 'admin', role: 'admin', name: 'Michael Gierhart' });
 });
 
+// Dashboard route
+app.get('/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'login.html'));
+});
+
 // Initialize database and start server
 initDatabase().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
