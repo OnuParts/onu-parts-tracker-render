@@ -1,0 +1,222 @@
+import { Switch, Route, Redirect, useLocation, Link as WouterLink } from "wouter";
+import { queryClient } from "./lib/queryClient";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { useToast } from "@/hooks/use-toast";
+import Layout from "@/components/layout/Layout";
+import NotFound from "@/pages/not-found";
+import Dashboard from "@/pages/dashboard";
+import PartsInventory from "@/pages/parts-inventory";
+import PartsIssuance from "@/pages/parts-issuance";
+import Reports from "@/pages/reports";
+import Settings from "@/pages/settings";
+import Login from "@/pages/login";
+import MobileLogin from "@/pages/mobile-login";
+import TestPage from "@/pages/test-page";
+import Technicians from "@/pages/technicians";
+import Buildings from "@/pages/buildings";
+import { ProtectedRoute } from "./lib/protected-route";
+import { AuthProvider, useAuth } from "./hooks/use-auth";
+import { useEffect } from "react";
+
+// Helper function to detect mobile devices with enhanced detection
+function isMobileDevice() {
+  const userAgent = navigator.userAgent.toLowerCase();
+  
+  // Check common mobile device signatures
+  const mobileKeywords = [
+    'android', 'webos', 'iphone', 'ipad', 'ipod', 'blackberry', 'iemobile', 'opera mini',
+    'mobi', 'tablet', 'phone', 'mobile', 'samsung', 'pixel', 'windows phone'
+  ];
+  
+  // Test against broad patterns and specific keywords
+  const hasMobilePattern = /iphone|ipad|ipod|android|blackberry|windows phone/i.test(userAgent);
+  const hasMobileKeyword = mobileKeywords.some(keyword => userAgent.includes(keyword));
+  
+  // Detect as mobile explicitly with URL parameters
+  const params = new URLSearchParams(window.location.search);
+  const forceMobile = params.get('mobile') === 'true';
+  const directMode = params.get('direct') === 'true';
+  
+  // Check localStorage flag set by the static HTML page
+  const localStorageMobile = localStorage.getItem('mobile_device') === 'true';
+  
+  // Also check screen size as a fallback
+  const smallScreen = window.innerWidth <= 768;
+  
+  // Combine all checks
+  const isMobile = hasMobilePattern || hasMobileKeyword || forceMobile || localStorageMobile || smallScreen || directMode;
+  
+  // Log key flags
+  console.log(`Direct mode: ${directMode}`);
+  
+  console.log(`User agent: ${userAgent}`);
+  console.log(`Detected as mobile device: ${isMobile}`);
+  
+  // Store the result for future page loads
+  if (isMobile) {
+    localStorage.setItem('mobile_device', 'true');
+  }
+  
+  // Return the result of our combined checks
+  return isMobile;
+}
+
+// Root route handler to redirect to login if not authenticated
+function RootRedirect() {
+  const { user, isLoading } = useAuth();
+  const [, navigate] = useLocation();
+  const isMobile = isMobileDevice();
+  
+  useEffect(() => {
+    // Wait for auth state to load
+    if (!isLoading) {
+      if (user) {
+        console.log("User is authenticated at root, redirecting based on role");
+        
+        // For mobile users, check role
+        if (isMobile) {
+          if (user.role === 'technician') {
+            // Technicians always go to parts issuance
+            console.log("Mobile technician detected, redirecting to parts issuance");
+            navigate("/parts-issuance");
+          } else if (user.role === 'admin') {
+            // Admins go to dashboard, even on mobile
+            console.log("Mobile admin detected, redirecting to dashboard");
+            navigate("/dashboard");
+          } else if (user.role === 'student') {
+            // Student workers go to parts inventory
+            console.log("Mobile student worker detected, redirecting to parts inventory");
+            navigate("/parts-inventory");
+          } else {
+            // Unknown role - default to dashboard
+            navigate("/dashboard");
+          }
+        } else {
+          // Desktop users go to dashboard
+          navigate("/dashboard");
+        }
+      } else {
+        console.log("User is not authenticated at root, redirecting to login");
+        
+        // Mobile users get the special simplified login page
+        if (isMobile) {
+          console.log("Mobile device detected, redirecting to mobile login");
+          navigate("/mobile-login");
+        } else {
+          // Desktop users get the regular login
+          navigate("/login");
+        }
+      }
+    }
+  }, [user, isLoading, navigate, isMobile]);
+  
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen p-4">
+      <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full mb-4"></div>
+      <p className="text-center text-muted-foreground">Redirecting...</p>
+    </div>
+  );
+}
+
+// Import the MobileLayout component
+import { MobileLayout } from "@/components/layout/MobileLayout";
+
+function Router() {
+  const isMobile = isMobileDevice();
+  
+  return (
+    <Switch>
+      {/* Root path redirects based on auth state */}
+      <Route path="/" component={RootRedirect} />
+      
+      {/* Auth routes */}
+      <Route path="/login" component={Login} />
+      <Route path="/mobile-login" component={MobileLogin} />
+      <Route path="/test-page" component={TestPage} />
+      <Route path="/auth">
+        <Redirect to="/login" />
+      </Route>
+      
+      {/* Conditionally use mobile or desktop layout */}
+      {isMobile ? (
+        <Switch>
+          {/* Simple mobile routes wrapped in MobileLayout */}
+          <Route path="/dashboard">
+            <MobileLayout>
+              <Dashboard />
+            </MobileLayout>
+          </Route>
+          
+          <Route path="/parts-issuance">
+            <MobileLayout>
+              <PartsIssuance />
+            </MobileLayout>
+          </Route>
+          
+          <Route path="/parts-inventory">
+            <MobileLayout>
+              <PartsInventory />
+            </MobileLayout>
+          </Route>
+          
+          <Route path="/reports">
+            <MobileLayout>
+              <Reports />
+            </MobileLayout>
+          </Route>
+          
+          <Route path="/settings">
+            <MobileLayout>
+              <Settings />
+            </MobileLayout>
+          </Route>
+          
+          <Route path="/technicians">
+            <MobileLayout>
+              <Technicians />
+            </MobileLayout>
+          </Route>
+          
+          <Route path="/buildings">
+            <MobileLayout>
+              <Buildings />
+            </MobileLayout>
+          </Route>
+          
+          <Route>
+            <MobileLayout>
+              <NotFound />
+            </MobileLayout>
+          </Route>
+        </Switch>
+      ) : (
+        <Layout>
+          <Switch>
+            <ProtectedRoute path="/dashboard" component={Dashboard} />
+            <ProtectedRoute path="/parts-inventory" component={PartsInventory} />
+            <ProtectedRoute path="/parts-issuance" component={PartsIssuance} />
+            <ProtectedRoute path="/reports" component={Reports} />
+            <ProtectedRoute path="/settings" component={Settings} />
+            <ProtectedRoute path="/technicians" component={Technicians} />
+            <ProtectedRoute path="/buildings" component={Buildings} />
+            <Route component={NotFound} />
+          </Switch>
+        </Layout>
+      )}
+    </Switch>
+  );
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <Router />
+        <Toaster />
+      </AuthProvider>
+    </QueryClientProvider>
+  );
+}
+
+export default App;
