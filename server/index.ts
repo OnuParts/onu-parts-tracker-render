@@ -410,8 +410,8 @@ app.use((req, res, next) => {
 app.use(systemMonitor);
 app.use(validateCriticalOperations);
 
-// Directly serve static files from client/public directory
-app.use(express.static(path.join(process.cwd(), 'client', 'public')));
+// Serve static React build files first
+app.use(express.static(path.join(process.cwd(), 'server', 'public')));
 
 // Serve the root directory (where mobile.html is located)
 app.use(express.static(process.cwd()));
@@ -436,410 +436,12 @@ app.use(session({
   rolling: true // Renew session with each response
 }));
 
-// Root route to redirect to login or appropriate page based on auth status
-// Also serves as health check endpoint for deployment systems
-app.get('/', (req, res) => {
-  // Health check detection - respond with 200 OK for deployment systems
-  if (!req.headers.cookie && (
-    req.headers['user-agent']?.includes('health') || 
-    req.headers['user-agent']?.includes('deployment') ||
-    req.headers['user-agent']?.includes('curl') ||
-    req.method === 'HEAD'
-  )) {
-    return res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-  }
-  
-  if (req.session?.user) {
-    console.log('User authenticated at root URL, redirecting based on role:', req.session.user.role);
-    if (req.session.user.role === 'admin') {
-      return res.redirect('/dashboard');
-    } else if (req.session.user.role === 'student') {
-      return res.redirect('/parts-inventory');
-    } else if (req.session.user.role === 'controller') {
-      return res.redirect('/dashboard');
-    } else {
-      return res.redirect('/parts-issuance');
-    }
-  } else {
-    console.log('No user detected at root URL, redirecting to login');
-    return res.redirect('/login');
-  }
+// Health check endpoint for deployment systems
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Serve the static login.html file for the login route
-app.get('/login', (req, res) => {
-  // Check if user is already authenticated using session
-  if (req.session?.user) {
-    console.log('User already authenticated at /login:', req.session.user);
-    // Redirect based on role
-    if (req.session.user.role === 'admin') {
-      return res.redirect('/dashboard');
-    } else if (req.session.user.role === 'student') {
-      return res.redirect('/parts-inventory');
-    } else if (req.session.user.role === 'controller') {
-      return res.redirect('/dashboard');
-    } else {
-      return res.redirect('/parts-issuance');
-    }
-  }
-  
-  console.log('Direct login access with query params:', req.query);
-  
-  const loginHtmlPath = path.join(process.cwd(), 'client', 'public', 'login.html');
-  console.log('Serving static login page from:', loginHtmlPath);
-  
-  if (fs.existsSync(loginHtmlPath)) {
-    res.sendFile(loginHtmlPath);
-  } else {
-    console.error('Login HTML file not found at', loginHtmlPath);
-    res.status(404).send('Login page not found');
-  }
-});
-
-// Redirect mobile-login to the main login page
-app.get('/mobile-login', (req, res) => {
-  console.log('Mobile login access detected - redirecting to main login page');
-  return res.redirect('/login');
-});
-
-// Serve the admin login page directly
-app.get('/admin-login', (req, res) => {
-  // Check if user is already authenticated
-  if (req.session?.user) {
-    console.log('User already authenticated at /admin-login:', req.session.user);
-    // Redirect based on role
-    if (req.session.user.role === 'admin') {
-      return res.redirect('/dashboard');
-    } else if (req.session.user.role === 'student') {
-      return res.redirect('/parts-inventory');
-    } else {
-      return res.redirect('/parts-issuance');
-    }
-  }
-  
-  console.log('Serving admin login page');
-  
-  // Try the simple version first
-  const simpleAdminLoginHtmlPath = path.join(process.cwd(), 'client', 'public', 'admin-login-simple.html');
-  
-  if (fs.existsSync(simpleAdminLoginHtmlPath)) {
-    console.log('Simple admin login HTML exists, sending file');
-    return res.sendFile(simpleAdminLoginHtmlPath);
-  }
-  
-  // Fall back to the regular version if simple version doesn't exist
-  const adminLoginHtmlPath = path.join(process.cwd(), 'client', 'public', 'admin-login.html');
-  console.log('Admin login path:', adminLoginHtmlPath);
-  
-  if (fs.existsSync(adminLoginHtmlPath)) {
-    console.log('Admin login HTML exists, sending file');
-    res.sendFile(adminLoginHtmlPath);
-  } else {
-    console.error('Admin login HTML file not found');
-    res.status(404).send('Admin login page not found');
-  }
-});
-
-// Also add a direct endpoint for testing
-app.get('/admin-simple', (req, res) => {
-  console.log('Serving simple admin login page');
-  
-  const simpleAdminLoginHtmlPath = path.join(process.cwd(), 'client', 'public', 'admin-login-simple.html');
-  
-  if (fs.existsSync(simpleAdminLoginHtmlPath)) {
-    console.log('Simple admin login HTML exists, sending file');
-    res.sendFile(simpleAdminLoginHtmlPath);
-  } else {
-    console.error('Simple admin login HTML file not found, serving inline HTML');
-    // Serve a simple inline HTML as fallback
-    const html = `<!DOCTYPE html>
-      <html>
-      <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>ONU Admin Login</title>
-          <style>
-              body { font-family: Arial; margin: 20px; background: #f5f5f5; }
-              .container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-              h1 { color: #F36532; text-align: center; }
-              input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; }
-              button { background: #F36532; color: white; border: none; padding: 12px; width: 100%; cursor: pointer; }
-          </style>
-      </head>
-      <body>
-          <div class="container">
-              <h1>ONU Admin Login</h1>
-              
-              <form action="/api/login" method="post">
-                  <input type="hidden" name="role" value="admin">
-                  <input type="hidden" name="redirect" value="/dashboard">
-                  
-                  <label>Username:</label>
-                  <input type="text" name="username" value="admin" required>
-                  
-                  <label>Password:</label>
-                  <input type="password" name="password" value="admin" required>
-                  
-                  <button type="submit">Login</button>
-              </form>
-              
-              <p style="text-align: center; margin-top: 20px;">
-                  <a href="/mobile-login" style="color: #F36532;">Back to Mobile Login</a>
-              </p>
-          </div>
-      </body>
-      </html>`;
-    res.setHeader('Content-Type', 'text/html');
-    res.send(html);
-  }
-});
-
-// Serve the student login page directly
-app.get('/student-login', (req, res) => {
-  // Check if user is already authenticated
-  if (req.session?.user) {
-    console.log('User already authenticated at /student-login:', req.session.user);
-    // Redirect based on role
-    if (req.session.user.role === 'admin') {
-      return res.redirect('/dashboard');
-    } else if (req.session.user.role === 'student') {
-      return res.redirect('/parts-inventory');
-    } else {
-      return res.redirect('/parts-issuance');
-    }
-  }
-  
-  console.log('Serving student login page');
-  
-  const studentLoginHtmlPath = path.join(process.cwd(), 'client', 'public', 'student-login.html');
-  console.log('Student login path:', studentLoginHtmlPath);
-  
-  if (fs.existsSync(studentLoginHtmlPath)) {
-    console.log('Student login HTML exists, sending file');
-    res.sendFile(studentLoginHtmlPath);
-  } else {
-    console.error('Student login HTML file not found');
-    res.status(404).send('Student login page not found');
-  }
-});
-
-// Serve a simplified dashboard for mobile devices
-app.get('/dashboard-simple', (req, res) => {
-  // Check authentication
-  if (!req.session?.user) {
-    console.log('User not authenticated at /dashboard-simple');
-    return res.redirect('/admin-login');
-  }
-  
-  console.log('Serving simple dashboard page');
-  
-  const simpleDashboardPath = path.join(process.cwd(), 'client', 'public', 'dashboard-simple.html');
-  
-  if (fs.existsSync(simpleDashboardPath)) {
-    console.log('Simple dashboard HTML exists, sending file');
-    res.sendFile(simpleDashboardPath);
-  } else {
-    console.error('Simple dashboard HTML file not found');
-    // Fall back to the React dashboard
-    res.redirect('/dashboard');
-  }
-});
-
-// Serve the tech login page directly
-app.get('/tech-login', (req, res) => {
-  // Check if user is already authenticated
-  if (req.session?.user) {
-    console.log('User already authenticated at /tech-login:', req.session.user);
-    // Redirect based on role
-    if (req.session.user.role === 'admin') {
-      return res.redirect('/dashboard');
-    } else if (req.session.user.role === 'student') {
-      return res.redirect('/parts-inventory');
-    } else {
-      return res.redirect('/parts-issuance');
-    }
-  }
-  
-  console.log('Serving tech login page');
-  
-  const techLoginHtmlPath = path.join(process.cwd(), 'client', 'public', 'tech-login.html');
-  console.log('Tech login path:', techLoginHtmlPath);
-  
-  if (fs.existsSync(techLoginHtmlPath)) {
-    console.log('Tech login HTML exists, sending file');
-    res.sendFile(techLoginHtmlPath);
-  } else {
-    console.error('Tech login HTML file not found');
-    res.status(404).send('Tech login page not found');
-  }
-});
-
-// Serve the static quick-count-direct.html file for direct access to Quick Count
-app.get('/quick-count-direct', (req, res) => {
-  console.log('Direct quick count access');
-  
-  const quickCountDirectPath = path.join(process.cwd(), 'client', 'public', 'quick-count-direct.html');
-  console.log('Serving static quick count direct access page from:', quickCountDirectPath);
-  
-  if (fs.existsSync(quickCountDirectPath)) {
-    res.sendFile(quickCountDirectPath);
-  } else {
-    console.error('Quick count direct access HTML file not found at', quickCountDirectPath);
-    res.status(404).send('Quick count direct access page not found');
-  }
-});
-
-// Serve the standalone quick-count-standalone.html file that doesn't depend on React auth
-app.get('/quick-count-standalone', (req, res) => {
-  console.log('Standalone quick count access');
-  
-  const quickCountStandalonePath = path.join(process.cwd(), 'client', 'public', 'quick-count-standalone.html');
-  console.log('Serving standalone quick count page from:', quickCountStandalonePath);
-  
-  if (fs.existsSync(quickCountStandalonePath)) {
-    res.sendFile(quickCountStandalonePath);
-  } else {
-    console.error('Standalone quick count HTML file not found at', quickCountStandalonePath);
-    res.status(404).send('Standalone quick count page not found');
-  }
-});
-
-// Direct root level route to serve an ultra-simple HTML form for mobile
-app.get('/mobile', (req, res) => {
-  // Check if user is already authenticated using session
-  if (req.session?.user) {
-    console.log('User already authenticated:', req.session.user);
-    return res.redirect('/parts-issuance');
-  }
-  
-  const mobilePath = path.join(process.cwd(), 'mobile.html');
-  console.log('Trying to serve mobile login from:', mobilePath);
-  
-  if (fs.existsSync(mobilePath)) {
-    console.log('Mobile login file exists, sending...');
-    res.sendFile(mobilePath);
-  } else {
-    console.error('Mobile login file not found at', mobilePath);
-    // Serve a simple inline HTML
-    const html = `
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>ONU Parts Tracker Login</title>
-        <style>
-          body { font-family: sans-serif; margin: 20px; }
-          input, button { margin: 10px 0; padding: 8px; width: 100%; box-sizing: border-box; }
-          button { background: #F36532; color: white; border: none; }
-          #technicianList { margin-top: 20px; }
-          .tech-item { border-bottom: 1px solid #eee; padding: 10px 0; }
-          h3 { margin-top: 30px; }
-        </style>
-      </head>
-      <body>
-        <h1>ONU Parts Tracker</h1>
-        <form id="loginForm">
-          <label>Name: <input name="name" required></label>
-          <label>Department: <input name="department"></label>
-          <input type="hidden" name="role" value="technician">
-          <button type="submit">Login</button>
-        </form>
-        
-        <h3>OR Select Technician</h3>
-        <div id="technicianList">Loading technicians...</div>
-        
-        <script>
-          // Fetch technicians on page load
-          fetch('/api/technicians-list')
-            .then(res => res.json())
-            .then(technicians => {
-              const list = document.getElementById('technicianList');
-              if (technicians && technicians.length) {
-                let html = '';
-                technicians.forEach(tech => {
-                  html += '<div class="tech-item">';
-                  html += '<strong>' + tech.name + '</strong>';
-                  if (tech.department) html += ' (' + tech.department + ')';
-                  html += '<button onclick="loginAsTechnician(\'' + tech.username + '\')">Select</button>';
-                  html += '</div>';
-                });
-                list.innerHTML = html;
-              } else {
-                list.innerHTML = '<p>No technicians found</p>';
-              }
-            })
-            .catch(err => {
-              document.getElementById('technicianList').innerHTML = 
-                '<p>Could not load technicians. Please use the form above.</p>';
-              console.error('Error loading technicians:', err);
-            });
-          
-          // Login as technician function
-          function loginAsTechnician(username) {
-            const data = {
-              username: username,
-              role: 'technician'
-            };
-            
-            fetch('/api/login', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(data)
-            })
-            .then(response => {
-              if (response.redirected) {
-                window.location.href = response.url;
-              } else if (response.ok) {
-                window.location.href = '/parts-issuance';
-              } else {
-                return response.text().then(text => {
-                  alert('Login failed: ' + text);
-                });
-              }
-            })
-            .catch(error => {
-              alert('Login error: ' + error.message);
-            });
-          }
-          
-          // Add manual submission handling
-          document.getElementById('loginForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const formData = new FormData(this);
-            const data = {};
-            for (const [key, value] of formData.entries()) {
-              data[key] = value;
-            }
-            
-            fetch('/api/login', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(data)
-            })
-            .then(response => {
-              if (response.redirected) {
-                window.location.href = response.url;
-              } else if (response.ok) {
-                window.location.href = '/parts-issuance'; 
-              } else {
-                return response.text().then(text => {
-                  alert('Login failed: ' + text);
-                });
-              }
-            })
-            .catch(error => {
-              alert('Login error: ' + error.message);
-            });
-          });
-        </script>
-      </body>
-      </html>
-    `;
-    res.setHeader('Content-Type', 'text/html');
-    res.send(html);
-  }
-});
+// Let React handle all frontend routes
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -900,7 +502,7 @@ app.use((req, res, next) => {
   if (app.get("env") === "development") {
     await setupVite(app, server);
   } else {
-    // serveStatic(app); 
+    serveStatic(app);
   }
 })();
 
@@ -929,62 +531,7 @@ app.post('/api/create-backup', async (req, res) => {
   }
 });
 
-// Public downloads (no authentication required)
-app.get('/downloads', (req, res) => {
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ONU Parts Tracker - Downloads</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 40px; background: #f8fafc; }
-        .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1 { color: #F36532; text-align: center; margin-bottom: 30px; }
-        .download-btn { display: inline-block; background: #F36532; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 10px 0; font-weight: 600; }
-        .download-btn:hover { background: #e5532a; }
-        .description { color: #64748b; margin-bottom: 20px; }
-        .section { margin: 30px 0; padding: 20px; background: #f8fafc; border-radius: 8px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔧 ONU Parts Tracker Downloads</h1>
-        
-        <div class="section">
-            <h3>📦 Complete Export Package</h3>
-            <p class="description">Full source code, database backup, and setup files for independent deployment.</p>
-            <a href="/api/public-download-package" class="download-btn">Download Export Package (ZIP)</a>
-        </div>
-        
-        <div class="section">
-            <h3>📋 Deployment Guide</h3>
-            <p class="description">Step-by-step installation instructions for local deployment.</p>
-            <a href="/api/public-download-guide" class="download-btn">Download Setup Guide (TXT)</a>
-        </div>
-        
-        <div class="section">
-            <h3>ℹ️ Package Contents</h3>
-            <ul>
-                <li>Complete React frontend and Node.js backend</li>
-                <li>PostgreSQL database backup with all data</li>
-                <li>Environment configuration templates</li>
-                <li>Startup scripts and documentation</li>
-                <li>Installation guide for Windows, macOS, and Linux</li>
-            </ul>
-        </div>
-        
-        <p style="text-align: center; color: #64748b; margin-top: 40px;">
-            Generated: ${new Date().toISOString()}<br>
-            System ready for independent deployment
-        </p>
-    </div>
-</body>
-</html>`;
-  
-  res.setHeader('Content-Type', 'text/html');
-  res.send(html);
-});
+// Let React handle /downloads route
 
 
 
@@ -1195,3 +742,19 @@ try {
 } catch (err) {
   console.error('Error adding Excel routes:', err);
 }
+
+// Fallback: serve React app for any non-API routes (MUST be last)
+app.get('*', (req, res) => {
+  // Skip API routes
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+  
+  // Serve React app for all other routes
+  const indexPath = path.join(process.cwd(), 'server', 'public', 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).send('React app not found');
+  }
+});

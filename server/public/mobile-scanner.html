@@ -82,7 +82,10 @@
                         cameraId, 
                         {
                             fps: 10,
-                            qrbox: { width: 250, height: 150 }
+                            qrbox: { width: 300, height: 100 },
+                            aspectRatio: 3.0,
+                            supportedScanTypes: [1], // Focus on 1D barcodes
+                            formatsToSupport: [0,1,2,3,4,5,6,7,8,9,10]
                         },
                         (decodedText) => {
                             resultDiv.innerHTML = '<strong>Success!</strong><br/>Barcode: ' + decodedText;
