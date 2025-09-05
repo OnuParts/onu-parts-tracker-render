@@ -745,12 +745,10 @@ try {
 
 // Fallback: serve React app for any non-API routes (MUST be last)
 app.get('*', (req, res) => {
-  // Skip API routes
   if (req.path.startsWith('/api')) {
     return res.status(404).json({ error: 'API endpoint not found' });
   }
   
-  // Serve React app for all other routes
   const indexPath = path.join(process.cwd(), 'server', 'public', 'index.html');
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
