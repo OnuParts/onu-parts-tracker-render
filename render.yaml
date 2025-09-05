@@ -2,17 +2,8 @@ services:
   - type: web
     name: onu-parts-tracker
     env: node
-    buildCommand: npm install
+    buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: onu-parts-db
-          property: connectionString
-
-databases:
-  - name: onu-parts-db
-    databaseName: onu_parts_tracker
-    user: onu_admin
