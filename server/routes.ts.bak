@@ -1,0 +1,1307 @@
+import express, { type Express, Request, Response, NextFunction } from "express";
+import { createServer, type Server } from "http";
+import fs from 'fs';
+import path from 'path';
+import { storage } from "./storage";
+import { pgStorage } from "./pgStorage";
+import { pool } from "./db";
+
+// Use PostgreSQL storage for persistence
+const db = pgStorage;
+import { z } from "zod";
+import { 
+  insertPartSchema,
+  insertPartsIssuanceSchema,
+  insertBuildingSchema
+} from "@shared/schema";
+import { fromZodError } from "zod-validation-error";
+import upload from "./upload";
+import { 
+  readPartsFromExcel, 
+  generatePartsExcel, 
+  generateTemplateExcel, 
+  readTechniciansFromExcel,
+  generateTechniciansExcel,
+  generateTechniciansTemplateExcel,
+  readBuildingsFromExcel,
+  generateBuildingsExcel,
+  generateBuildingsTemplateExcel,
+  ImportResult 
+} from "./excel";
+
+// Module-level variable to store the admin email between requests
+let adminEmail: string | null = 'm-gierhart@onu.edu';
+
+// Authentication middleware
+const requireAuth = (req: Request, res: Response, next: NextFunction) => {
+  if (req.session?.user) {
+    next();
+  } else {
+    res.status(401).json({ error: "Authentication required" });
+  }
+};
+
+// Role-based access control middleware
+const requireRole = (roles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (req.session?.user && roles.includes(req.session.user.role)) {
+      next();
+    } else {
+      res.status(403).json({ error: "Access denied" });
+    }
+  };
+};
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // Serve static files from client/public
+  app.use(express.static(path.join(process.cwd(), 'client', 'public')));
+  
+  // Root URL handler - redirect to the mobile interface for better mobile compatibility
+  app.get("/", (req, res) => {
+    if (req.session?.user?.role === "technician") {
+      // If a technician is logged in, redirect to the tech interface
+      console.log("Technician detected at root URL, redirecting to mobile tech interface");
+      return res.redirect("/tech");
+    } else if (req.session?.user?.role === "admin") {
+      // If an admin is logged in, redirect to the dashboard
+      console.log("Admin detected at root URL, redirecting to dashboard");
+      return res.redirect("/dashboard");
+    } else {
+      // If no one is logged in, redirect to the mobile login
+      console.log("No user detected at root URL, redirecting to mobile login");
+      return res.redirect("/tech");
+    }
+  });
+  
+  // Register a specific route for simple-login.html
+  app.get('/simple', (req, res) => {
+    const filePath = path.join(process.cwd(), 'client', 'public', 'simple-login.html');
+    console.log('Trying to serve simple login from:', filePath);
+    if (fs.existsSync(filePath)) {
+      console.log('Simple login file exists, sending...');
+      res.sendFile(filePath);
+    } else {
+      console.log('Simple login file not found, falling back to index.html');
+      res.sendFile(path.join(process.cwd(), 'client', 'index.html'));
+    }
+  });
+  
+  const router = express.Router();
+
+  // Mock endpoint for work orders (removed functionality)
+  router.get("/work-orders", requireAuth, requireRole(["admin"]), (req: Request, res: Response) => {
+    // Return an empty array since work orders functionality has been removed
+    res.json([]);
+  });
+
+  // Statistics
+  router.get("/stats", async (req: Request, res: Response) => {
+    try {
+      const lowStockParts = await db.getLowStockParts();
+      const monthlyPartsIssuance = await db.getMonthlyPartsIssuanceTotal();
+      const parts = await db.getParts();
+      
+      res.json({
+        totalParts: parts.length,
+        totalPartsIssuance: monthlyPartsIssuance,
+        lowStockItemsCount: lowStockParts.length,
+      });
+    } catch (error) {
+      console.error("Error fetching stats:", error);
+      res.status(500).json({ error: "Failed to fetch statistics" });
+    }
+  });
+
+  // Parts
+  router.get("/parts", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const parts = await db.getParts();
+      res.json(parts);
+    } catch (error) {
+      console.error("Error fetching parts:", error);
+      res.status(500).json({ error: "Failed to fetch parts" });
+    }
+  });
+
+  router.get("/parts/low-stock", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const lowStockParts = await db.getLowStockParts();
+      res.json(lowStockParts);
+    } catch (error) {
+      console.error("Error fetching low stock parts:", error);
+      res.status(500).json({ error: "Failed to fetch low stock parts" });
+    }
+  });
+
+  router.get("/parts/:id", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const part = await db.getPartByPartId(req.params.id);
+      if (!part) {
+        return res.status(404).json({ error: "Part not found" });
+      }
+      
+      // Get parts issuance history for this part
+      const issuanceHistory = await db.getPartsIssuanceByPartId(part.id);
+      
+      res.json({ ...part, issuanceHistory });
+    } catch (error) {
+      console.error("Error fetching part:", error);
+      res.status(500).json({ error: "Failed to fetch part" });
+    }
+  });
+
+  router.post("/parts", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const validatedData = insertPartSchema.parse(req.body);
+      const newPart = await db.createPart(validatedData);
+      res.status(201).json(newPart);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const validationError = fromZodError(error);
+        return res.status(400).json({ error: validationError.message });
+      }
+      console.error("Error creating part:", error);
+      res.status(500).json({ error: "Failed to create part" });
+    }
+  });
+
+  router.patch("/parts/:id", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const part = await db.getPartByPartId(req.params.id);
+      if (!part) {
+        return res.status(404).json({ error: "Part not found" });
+      }
+      
+      const validatedData = insertPartSchema.partial().parse(req.body);
+      const updated = await db.updatePart(part.id, validatedData);
+      res.json(updated);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const validationError = fromZodError(error);
+        return res.status(400).json({ error: validationError.message });
+      }
+      console.error("Error updating part:", error);
+      res.status(500).json({ error: "Failed to update part" });
+    }
+  });
+
+  // Parts Issuance
+  router.post("/parts-issuance", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const validatedData = insertPartsIssuanceSchema.parse(req.body);
+      
+      // Check if part exists and has enough quantity
+      const part = await db.getPart(validatedData.partId);
+      if (!part) {
+        return res.status(404).json({ error: "Part not found" });
+      }
+      
+      if (part.quantity < validatedData.quantity) {
+        return res.status(400).json({ 
+          error: "Not enough parts in inventory",
+          available: part.quantity,
+          requested: validatedData.quantity
+        });
+      }
+      
+      const partsIssuance = await db.createPartsIssuance(validatedData);
+      res.status(201).json(partsIssuance);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const validationError = fromZodError(error);
+        return res.status(400).json({ error: validationError.message });
+      }
+      console.error("Error issuing parts:", error);
+      res.status(500).json({ error: "Failed to issue parts" });
+    }
+  });
+
+  router.get("/parts-issuance/recent", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 5;
+      const recentIssuances = await db.getRecentPartsIssuance(limit);
+      res.json(recentIssuances);
+    } catch (error) {
+      console.error("Error fetching recent parts issuance:", error);
+      res.status(500).json({ error: "Failed to fetch recent parts issuance" });
+    }
+  });
+
+  router.get("/parts-issuance/part/:id", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const part = await db.getPartByPartId(req.params.id);
+      if (!part) {
+        return res.status(404).json({ error: "Part not found" });
+      }
+      
+      const issuanceHistory = await db.getPartsIssuanceByPartId(part.id);
+      res.json(issuanceHistory);
+    } catch (error) {
+      console.error("Error fetching parts issuance history:", error);
+      res.status(500).json({ error: "Failed to fetch parts issuance history" });
+    }
+  });
+
+  // Buildings
+  router.get("/buildings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const buildings = await db.getBuildings();
+      res.json(buildings);
+    } catch (error) {
+      console.error("Error fetching buildings:", error);
+      res.status(500).json({ error: "Failed to fetch buildings" });
+    }
+  });
+  
+  // Define template and export routes BEFORE the /:id route
+  router.get("/buildings/template", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      console.log("Generating buildings template...");
+      const templateBuffer = generateBuildingsTemplateExcel();
+      
+      console.log("Template buffer created, size:", templateBuffer.length);
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=buildings_import_template.xlsx');
+      res.setHeader('Content-Length', templateBuffer.length);
+      
+      res.send(templateBuffer);
+    } catch (error) {
+      console.error("Error generating template:", error);
+      res.status(400).json({ error: "Failed to generate template" });
+    }
+  });
+  
+  router.get("/buildings/export", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const buildings = await db.getBuildings();
+      const excelBuffer = generateBuildingsExcel(buildings);
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=buildings.xlsx');
+      res.setHeader('Content-Length', excelBuffer.length);
+      
+      res.send(excelBuffer);
+    } catch (error) {
+      console.error("Error exporting buildings:", error);
+      res.status(500).json({ error: "Failed to export buildings" });
+    }
+  });
+  
+  router.get("/buildings/:id", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid building ID" });
+      }
+      
+      const building = await db.getBuilding(id);
+      if (!building) {
+        return res.status(404).json({ error: "Building not found" });
+      }
+      
+      res.json(building);
+    } catch (error) {
+      console.error("Error fetching building:", error);
+      res.status(500).json({ error: "Failed to fetch building" });
+    }
+  });
+  
+  router.post("/buildings", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const validatedData = insertBuildingSchema.parse(req.body);
+      const newBuilding = await db.createBuilding(validatedData);
+      res.status(201).json(newBuilding);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const validationError = fromZodError(error);
+        return res.status(400).json({ error: validationError.message });
+      }
+      console.error("Error creating building:", error);
+      res.status(500).json({ error: "Failed to create building" });
+    }
+  });
+  
+  router.patch("/buildings/:id", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid building ID" });
+      }
+      
+      const building = await db.getBuilding(id);
+      if (!building) {
+        return res.status(404).json({ error: "Building not found" });
+      }
+      
+      const validatedData = insertBuildingSchema.partial().parse(req.body);
+      const updated = await db.updateBuilding(id, validatedData);
+      res.json(updated);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const validationError = fromZodError(error);
+        return res.status(400).json({ error: validationError.message });
+      }
+      console.error("Error updating building:", error);
+      res.status(500).json({ error: "Failed to update building" });
+    }
+  });
+  
+  router.delete("/buildings/:id", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid building ID" });
+      }
+      
+      const building = await db.getBuilding(id);
+      if (!building) {
+        return res.status(404).json({ error: "Building not found" });
+      }
+      
+      const result = await db.deleteBuilding(id);
+      if (result) {
+        res.status(204).end();
+      } else {
+        res.status(500).json({ error: "Failed to delete building" });
+      }
+    } catch (error) {
+      console.error("Error deleting building:", error);
+      res.status(500).json({ error: "Failed to delete building" });
+    }
+  });
+
+  // Excel import/export
+  router.post("/parts/import", requireAuth, requireRole(["admin"]), upload.single('file'), async (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+      
+      const { parts, errors } = readPartsFromExcel(req.file.path);
+      
+      // Process parts
+      const importResults: ImportResult = {
+        success: true,
+        totalRows: parts.length + errors.length,
+        importedRows: 0,
+        errors: errors
+      };
+      
+      // Import parts
+      if (parts.length > 0) {
+        let importedCount = 0;
+        
+        for (const part of parts) {
+          try {
+            // Check if part already exists
+            const existingPart = await db.getPartByPartId(part.partId);
+            
+            if (existingPart) {
+              // Update existing part
+              await db.updatePart(existingPart.id, part);
+            } else {
+              // Create new part
+              await db.createPart(part);
+            }
+            
+            importedCount++;
+          } catch (err) {
+            importResults.errors.push({
+              row: importResults.errors.length + importedCount + 2, // +2 for header and 0-indexing
+              message: `Failed to import: ${err instanceof Error ? err.message : String(err)}`
+            });
+          }
+        }
+        
+        importResults.importedRows = importedCount;
+      }
+      
+      // Clean up the uploaded file
+      fs.unlink(req.file.path, (err) => {
+        if (err) console.error("Error deleting temp file:", err);
+      });
+      
+      res.json(importResults);
+      
+    } catch (error) {
+      console.error("Error importing parts:", error);
+      
+      // Clean up the uploaded file if it exists
+      if (req.file) {
+        fs.unlink(req.file.path, (err) => {
+          if (err) console.error("Error deleting temp file:", err);
+        });
+      }
+      
+      res.status(500).json({ error: "Failed to import parts" });
+    }
+  });
+  
+  router.get("/parts/export", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const parts = await db.getParts();
+      const excelBuffer = generatePartsExcel(parts);
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=parts_inventory.xlsx');
+      res.setHeader('Content-Length', excelBuffer.length);
+      
+      res.send(excelBuffer);
+    } catch (error) {
+      console.error("Error exporting parts:", error);
+      res.status(500).json({ error: "Failed to export parts" });
+    }
+  });
+  
+  router.get("/parts/template", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const templateBuffer = generateTemplateExcel();
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=parts_import_template.xlsx');
+      res.setHeader('Content-Length', templateBuffer.length);
+      
+      res.send(templateBuffer);
+    } catch (error) {
+      console.error("Error generating template:", error);
+      res.status(500).json({ error: "Failed to generate template" });
+    }
+  });
+
+  // Users / Technicians
+  router.get("/users", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const users = await db.getUsers();
+      res.json(users);
+    } catch (error) {
+      console.error("Error fetching users:", error);
+      res.status(500).json({ error: "Failed to fetch users" });
+    }
+  });
+  
+  // Update profile
+  // Get current user profile
+  router.get("/profile", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      // Get the first admin user as the current user (for demo purposes)
+      const users = await db.getUsers();
+      const currentUser = users.find(user => user.role === 'admin');
+      
+      if (!currentUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      
+      res.json({
+        id: currentUser.id,
+        name: currentUser.name,
+        email: adminEmail
+      });
+    } catch (error) {
+      console.error("Error fetching profile:", error);
+      res.status(500).json({ error: "Failed to fetch profile" });
+    }
+  });
+
+  // Update user profile
+  router.patch("/profile", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      console.log("Profile update received:", req.body);
+      
+      // Get the first admin user as the current user (for demo purposes)
+      const users = await db.getUsers();
+      const currentUser = users.find(user => user.role === 'admin');
+      
+      if (!currentUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      
+      // Update the user in storage
+      const updatedUser = await db.updateUser(currentUser.id, {
+        name: req.body.name
+        // We don't actually store email in the schema, but for UI purposes we pretend we do
+      });
+      
+      // Store the email in our module variable for persistence between requests
+      if (req.body.email) {
+        adminEmail = req.body.email;
+      }
+      
+      // Handle successful update
+      if (updatedUser) {
+        res.json({ 
+          success: true,
+          user: {
+            id: updatedUser.id,
+            name: updatedUser.name,
+            email: adminEmail
+          }
+        });
+      } else {
+        res.status(500).json({ error: "Failed to update user record" });
+      }
+    } catch (error) {
+      console.error("Error updating profile:", error);
+      res.status(500).json({ error: "Failed to update profile" });
+    }
+  });
+  
+  // Change password
+  router.post("/change-password", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      console.log("Password change request received:", req.body);
+      // In a real app, this would validate the current password and update with the new one
+      // For now, we'll just return success since this is a mock endpoint
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error changing password:", error);
+      res.status(500).json({ error: "Failed to change password" });
+    }
+  });
+  
+  // Get notification settings
+  router.get("/notification-settings", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const settings = await db.getNotificationSettings();
+      res.json(settings);
+    } catch (error) {
+      console.error("Error fetching notification settings:", error);
+      res.status(500).json({ error: "Failed to fetch notification settings" });
+    }
+  });
+  
+  // Update notification settings
+  router.patch("/notification-settings", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      console.log("Notification settings update received:", req.body);
+      
+      // Validate request body
+      if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({ error: "Invalid notification settings" });
+      }
+      
+      const { workOrders, inventory } = req.body;
+      
+      if (!workOrders || !inventory || typeof workOrders !== 'object' || typeof inventory !== 'object') {
+        return res.status(400).json({ error: "Missing required notification settings" });
+      }
+      
+      // Update settings
+      const updatedSettings = await db.updateNotificationSettings({
+        workOrders: {
+          newWorkOrders: Boolean(workOrders.newWorkOrders),
+          statusChanges: Boolean(workOrders.statusChanges),
+          comments: Boolean(workOrders.comments)
+        },
+        inventory: {
+          lowStockAlerts: Boolean(inventory.lowStockAlerts),
+          partIssuance: Boolean(inventory.partIssuance)
+        }
+      });
+      
+      res.json(updatedSettings);
+    } catch (error) {
+      console.error("Error updating notification settings:", error);
+      res.status(500).json({ error: "Failed to update notification settings" });
+    }
+  });
+
+  router.get("/technicians", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const technicians = await db.getTechnicians();
+      res.json(technicians);
+    } catch (error) {
+      console.error("Error fetching technicians:", error);
+      res.status(500).json({ error: "Failed to fetch technicians" });
+    }
+  });
+
+  // Technicians import/export
+  router.post("/technicians/import", requireAuth, requireRole(["admin"]), upload.single('file'), async (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+      
+      const { technicians, errors } = readTechniciansFromExcel(req.file.path);
+      
+      console.log("Technicians read from Excel:", JSON.stringify(technicians, null, 2));
+      
+      // Process technicians
+      const importResults: ImportResult = {
+        success: true,
+        totalRows: technicians.length + errors.length,
+        importedRows: 0,
+        errors: errors
+      };
+      
+      // Import technicians
+      if (technicians.length > 0) {
+        let importedCount = 0;
+        
+        for (const technician of technicians) {
+          try {
+            console.log("Processing technician:", JSON.stringify(technician, null, 2));
+            
+            // Make sure role is one of the allowed values
+            if (technician.role !== 'admin' && technician.role !== 'technician') {
+              technician.role = 'technician'; // Default to technician if role is invalid
+              console.log("Fixed invalid role to 'technician'");
+            }
+            
+            // Check if technician already exists
+            const existingUser = await db.getUserByUsername(technician.username);
+            
+            if (existingUser) {
+              console.log("Updating existing user:", existingUser.id);
+              // Update existing user - in this case, we only update name, role, and department
+              // Note: We don't update passwords of existing users through import for security reasons
+              await db.createUser({
+                ...existingUser,
+                name: technician.name,
+                role: technician.role,
+                department: technician.department,
+                // Keep existing password
+                password: existingUser.password
+              });
+            } else {
+              console.log("Creating new technician");
+              // Create new technician
+              await db.createUser(technician);
+            }
+            
+            importedCount++;
+          } catch (err) {
+            console.error("Error importing technician:", err);
+            importResults.errors.push({
+              row: importResults.errors.length + importedCount + 2, // +2 for header and 0-indexing
+              message: `Failed to import: ${err instanceof Error ? err.message : String(err)}`
+            });
+          }
+        }
+        
+        importResults.importedRows = importedCount;
+      }
+      
+      // Clean up the uploaded file
+      fs.unlink(req.file.path, (err) => {
+        if (err) console.error("Error deleting temp file:", err);
+      });
+      
+      res.json(importResults);
+      
+    } catch (error) {
+      console.error("Error importing technicians:", error);
+      
+      // Clean up the uploaded file if it exists
+      if (req.file) {
+        fs.unlink(req.file.path, (err) => {
+          if (err) console.error("Error deleting temp file:", err);
+        });
+      }
+      
+      res.status(500).json({ error: "Failed to import technicians" });
+    }
+  });
+  
+  router.get("/technicians/export", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const technicians = await db.getTechnicians();
+      const excelBuffer = generateTechniciansExcel(technicians);
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=technicians.xlsx');
+      res.setHeader('Content-Length', excelBuffer.length);
+      
+      res.send(excelBuffer);
+    } catch (error) {
+      console.error("Error exporting technicians:", error);
+      res.status(500).json({ error: "Failed to export technicians" });
+    }
+  });
+  
+  router.get("/technicians/template", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const templateBuffer = generateTechniciansTemplateExcel();
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=technicians_import_template.xlsx');
+      res.setHeader('Content-Length', templateBuffer.length);
+      
+      res.send(templateBuffer);
+    } catch (error) {
+      console.error("Error generating template:", error);
+      res.status(500).json({ error: "Failed to generate template" });
+    }
+  });
+  
+  // Delete technician
+  router.delete("/technicians/:id", requireAuth, requireRole(["admin"]), async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid technician ID" });
+      }
+      
+      const user = await db.getUser(id);
+      if (!user) {
+        return res.status(404).json({ error: "Technician not found" });
+      }
+      
+      // Make sure we're not deleting the admin user
+      if (user.role === 'admin') {
+        return res.status(403).json({ error: "Cannot delete administrator user" });
+      }
+      
+      const result = await db.deleteUser(id);
+      if (result) {
+        res.status(204).end();
+      } else {
+        res.status(500).json({ error: "Failed to delete technician" });
+      }
+    } catch (error) {
+      console.error("Error deleting technician:", error);
+      res.status(500).json({ error: "Failed to delete technician" });
+    }
+  });
+
+  // Buildings import/export
+  router.post("/buildings/import", requireAuth, requireRole(["admin"]), upload.single('file'), async (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+      
+      const { buildings, errors } = readBuildingsFromExcel(req.file.path);
+      
+      // Process buildings
+      const importResults: ImportResult = {
+        success: true,
+        totalRows: buildings.length + errors.length,
+        importedRows: 0,
+        errors: errors
+      };
+      
+      // Import buildings
+      if (buildings.length > 0) {
+        let importedCount = 0;
+        
+        for (const building of buildings) {
+          try {
+            // Find if building with this name already exists
+            const existingBuildings = await db.getBuildings();
+            const existingBuilding = existingBuildings.find(b => b.name === building.name);
+            
+            if (existingBuilding) {
+              // Update existing building
+              await db.updateBuilding(existingBuilding.id, building);
+            } else {
+              // Create new building
+              await db.createBuilding(building);
+            }
+            
+            importedCount++;
+          } catch (err) {
+            importResults.errors.push({
+              row: importResults.errors.length + importedCount + 2, // +2 for header and 0-indexing
+              message: `Failed to import: ${err instanceof Error ? err.message : String(err)}`
+            });
+          }
+        }
+        
+        importResults.importedRows = importedCount;
+      }
+      
+      // Clean up the uploaded file
+      fs.unlink(req.file.path, (err) => {
+        if (err) console.error("Error deleting temp file:", err);
+      });
+      
+      res.json(importResults);
+      
+    } catch (error) {
+      console.error("Error importing buildings:", error);
+      
+      // Clean up the uploaded file if it exists
+      if (req.file) {
+        fs.unlink(req.file.path, (err) => {
+          if (err) console.error("Error deleting temp file:", err);
+        });
+      }
+      
+      res.status(500).json({ error: "Failed to import buildings" });
+    }
+  });
+
+  // Public endpoint for technicians (used in login page and mobile app)
+  router.get("/technicians-list", async (req: Request, res: Response) => {
+    try {
+      console.log("Fetching technicians for login page or mobile app");
+      
+      // Direct query to ensure we're getting data
+      const result = await pool.query("SELECT * FROM users ORDER BY name");
+      console.log(`Direct query found ${result.rows.length} users, filtering technicians...`);
+      
+      // Filter to just get technicians and admins, but present them all as "technicians" for UI consistency
+      const technicians = result.rows.filter(user => 
+        user.role === 'technician' || user.role === 'admin'
+      );
+      
+      console.log(`Found ${technicians.length} technicians/admins after filtering`);
+      
+      // Log a sample for debugging
+      if (technicians.length > 0) {
+        console.log("Sample technician:", {
+          id: technicians[0].id,
+          username: technicians[0].username,
+          name: technicians[0].name,
+          role: technicians[0].role,
+          department: technicians[0].department
+        });
+      }
+      
+      // Map and sanitize the results
+      const sanitizedTechnicians = technicians.map(tech => ({
+        id: tech.id,
+        username: tech.username,
+        name: tech.name,
+        role: 'technician', // Always display as technician for UI consistency
+        department: tech.department
+      }));
+      
+      // Cache the response for 1 minute for better performance
+      res.setHeader('Cache-Control', 'public, max-age=60');
+      res.json(sanitizedTechnicians);
+    } catch (error) {
+      console.error("Error fetching technicians for login:", error);
+      res.status(500).json({ error: "Failed to fetch technicians" });
+    }
+  });
+
+  // Authentication routes
+  // Special mobile-friendly technician login route that always redirects
+  router.post("/mobile-login", async (req: Request, res: Response) => {
+    try {
+      const { techId } = req.body;
+      
+      if (!techId) {
+        return res.status(400).send("Technician ID is required");
+      }
+      
+      console.log(`Mobile login requested for technician ID: ${techId}`);
+      
+      // Find the technician by ID
+      const technician = await db.getUser(parseInt(techId, 10));
+      if (!technician || technician.role !== "technician") {
+        return res.status(401).send("Invalid technician ID");
+      }
+      
+      // Set session data
+      req.session.user = {
+        id: technician.id,
+        username: technician.username,
+        name: technician.name,
+        role: "technician"
+      };
+      
+      console.log(`Mobile login successful for ${technician.name}, redirecting to technician view`);
+      
+      // Always redirect to technician view for technicians on mobile
+      return res.redirect('/technician');
+    } catch (error) {
+      console.error("Mobile login error:", error);
+      return res.status(500).send("Login failed. Please try again.");
+    }
+  });
+
+  router.post("/login", async (req: Request, res: Response) => {
+    try {
+      console.log("Login request received, raw body:", req.body);
+      console.log("Content-Type:", req.headers['content-type']);
+      
+      const { username, password, role, name, department, redirect } = req.body;
+      
+      // Store the redirect URL if provided (for direct form submission)
+      const redirectUrl = redirect || null;
+      
+      console.log("Processed login request:", { 
+        username, 
+        name, 
+        role, 
+        department,
+        redirectUrl,
+        hasPassword: !!password
+      });
+      
+      if (role === "admin") {
+        // Admin requires username and password
+        if (!username || !password) {
+          return res.status(400).json({ error: "Username and password required" });
+        }
+        
+        const user = await db.getUserByUsername(username);
+        if (!user || user.password !== password || user.role !== "admin") {
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+        
+        // Set session data
+        req.session.user = {
+          id: user.id,
+          username: user.username,
+          name: user.name,
+          role: "admin"
+        };
+        
+        // If a redirect URL was specified (for direct form submission), redirect to it
+        if (redirectUrl) {
+          return res.redirect(redirectUrl);
+        }
+        
+        // Otherwise return JSON for API response
+        return res.status(200).json({ 
+          id: user.id,
+          username: user.username,
+          name: user.name,
+          role: user.role
+        });
+      } 
+      else if (role === "technician") {
+        // Regular technician login (with existing account)
+        if (username && !name) {
+          const user = await db.getUserByUsername(username);
+          if (!user || user.role !== "technician") {
+            return res.status(401).json({ error: "Invalid user" });
+          }
+          
+          // Set session data
+          req.session.user = {
+            id: user.id,
+            username: user.username,
+            name: user.name,
+            role: "technician"
+          };
+          
+          // If a redirect URL was specified (for direct form submission), redirect to it
+          if (redirectUrl) {
+            return res.redirect(redirectUrl);
+          }
+          
+          // Otherwise return JSON for API response
+          return res.status(200).json({ 
+            id: user.id,
+            username: user.username,
+            name: user.name,
+            role: user.role
+          });
+        }
+        // Manual technician entry (temporary user)
+        else if (name) {
+          console.log(`Manual technician login requested for name: ${name}`);
+          
+          // Generate a temporary username based on the name
+          const tempUsername = `temp_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${Date.now()}`;
+          
+          // Either create a new user or find a matching one
+          let user;
+          try {
+            // Try to create a new temporary technician
+            user = await db.createUser({
+              username: tempUsername,
+              name: name,
+              password: 'temporary', // Not used for login but required by schema
+              role: 'technician',
+              department: department || 'Manual Entry'
+            });
+            
+            console.log("Created temporary technician:", user);
+          } catch (err) {
+            console.error("Error creating temporary technician:", err);
+            return res.status(500).json({ error: "Failed to create temporary user" });
+          }
+          
+          // Set session data
+          req.session.user = {
+            id: user.id,
+            username: user.username,
+            name: user.name,
+            role: "technician"
+          };
+          
+          // If a redirect URL was specified (for direct form submission), redirect to it
+          if (redirectUrl) {
+            return res.redirect(redirectUrl);
+          }
+          
+          // Otherwise return JSON for API response
+          return res.status(200).json({ 
+            id: user.id,
+            username: user.username,
+            name: user.name,
+            role: user.role,
+            temporary: true
+          });
+        }
+        else {
+          return res.status(400).json({ error: "Either username or name is required for technician login" });
+        }
+      }
+      
+      return res.status(400).json({ error: "Invalid role" });
+    } catch (error) {
+      console.error("Login error:", error);
+      res.status(500).json({ error: "Failed to login" });
+    }
+  });
+  
+  router.post("/logout", (req: Request, res: Response) => {
+    req.session.destroy((err) => {
+      if (err) {
+        return res.status(500).json({ error: "Failed to logout" });
+      }
+      res.status(200).json({ message: "Logged out successfully" });
+    });
+  });
+  
+  router.get("/current-user", (req: Request, res: Response) => {
+    if (req.session.user) {
+      res.status(200).json(req.session.user);
+    } else {
+      res.status(401).json({ error: "Not authenticated" });
+    }
+  });
+
+  app.use("/api", router);
+  
+  // Let's first make sure these files are accessible by checking the directory structure
+  app.use(express.static(path.join(process.cwd(), "client", "public")));
+  
+  // Direct access to mobile-login.html
+  app.get("/mobile-login", (req, res) => {
+    console.log("Serving mobile login page...");
+    
+    // Check if user is already authenticated
+    if (req.session.user) {
+      console.log("User already authenticated, redirecting to appropriate page");
+      const role = req.session.user.role;
+      if (role === "admin") {
+        return res.redirect("/dashboard");
+      } else {
+        return res.redirect("/technician");
+      }
+    }
+    
+    const filePath = path.join(process.cwd(), "client", "public", "mobile-login.html");
+    console.log("File path:", filePath);
+    
+    // Check if file exists
+    if (fs.existsSync(filePath)) {
+      console.log("File exists, sending...");
+      res.sendFile(filePath);
+    } else {
+      console.log("File not found, looking in directories:");
+      // List directories to debug
+      const publicDir = path.join(process.cwd(), "client", "public");
+      if (fs.existsSync(publicDir)) {
+        console.log("Public directory:", fs.readdirSync(publicDir));
+      } else {
+        console.log("Public directory not found");
+      }
+      // Fall back to index.html with login route
+      res.redirect("/login?mobile=true&direct=true");
+    }
+  });
+  
+  // Direct access to technician view for authenticated technicians - using the new mobile-tech.html
+  app.get("/technician", (req, res) => {
+    console.log("Serving technician view page to /technician route...");
+    
+    // Check if user is authenticated
+    if (!req.session.user) {
+      console.log("User not authenticated, redirecting to mobile login");
+      return res.redirect("/m");
+    }
+    
+    // Only allow technicians to access this page
+    if (req.session.user.role !== "technician") {
+      console.log("Non-technician attempting to access technician view, redirecting");
+      return res.redirect("/dashboard");
+    }
+    
+    // Use our new mobile tech app - it will handle authentication state internally
+    const filePath = path.join(process.cwd(), "client", "public", "mobile-tech.html");
+    console.log("File path:", filePath);
+    
+    // Check if file exists and serve it
+    if (fs.existsSync(filePath)) {
+      console.log("Mobile tech app exists, sending with full path resolution");
+      const resolvedPath = path.resolve(filePath);
+      console.log("Resolved absolute path:", resolvedPath);
+      res.sendFile(resolvedPath);
+    } else {
+      console.log("Mobile tech app not found, redirecting to parts issuance page");
+      res.redirect("/parts-issuance");
+    }
+  });
+  
+  // Direct access to test-page.html
+  app.get("/test-page", (req, res) => {
+    console.log("Serving test page...");
+    const filePath = path.join(process.cwd(), "client", "public", "test-page.html");
+    if (fs.existsSync(filePath)) {
+      res.sendFile(filePath);
+    } else {
+      res.sendFile(path.join(process.cwd(), "client", "index.html"));
+    }
+  });
+  
+  // Create a root-level path that directly serves the mobile login interface
+  app.get("/mobile", (req, res) => {
+    // Redirect to the /m route which has the same functionality
+    return res.redirect("/m");
+  });
+  
+  // Alternative path for direct mobile login - now uses mobile-tech.html
+  app.get("/m", (req, res) => {
+    console.log("Serving mobile direct login page to /m route...");
+    
+    // Check if user is already authenticated
+    if (req.session?.user) {
+      console.log("User already authenticated, serving mobile tech app for authenticated user");
+      // Just serve the mobile tech application which will handle the authentication state
+    }
+    
+    // Serve the standalone mobile application
+    const filePath = path.join(process.cwd(), "client", "public", "mobile-tech.html");
+    console.log("Mobile app file path:", filePath);
+    
+    if (fs.existsSync(filePath)) {
+      console.log("Mobile tech app exists, sending with absolute path...");
+      const resolvedPath = path.resolve(filePath);
+      console.log("Resolved absolute path:", resolvedPath);
+      res.sendFile(resolvedPath);
+    } else {
+      console.log("Mobile standalone app not found, falling back to simple inline HTML");
+      // Simple fallback HTML just in case
+      const html = `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>ONU Parts Tracker - Login</title>
+          <style>
+            body { font-family: system-ui, sans-serif; margin: 2rem; }
+            h1 { color: #F36532; }
+            .error { color: red; margin: 1rem 0; }
+            form { margin-top: 2rem; }
+            input, button { margin: 0.5rem 0; padding: 0.5rem; width: 100%; }
+            button { background: #F36532; color: white; border: none; cursor: pointer; }
+          </style>
+        </head>
+        <body>
+          <h1>ONU Parts Tracker</h1>
+          <p class="error">The mobile application page is missing.</p>
+          <form action="/api/login" method="POST">
+            <div>
+              <label for="name">Your Name</label>
+              <input type="text" id="name" name="name" required>
+            </div>
+            <div>
+              <label for="department">Department</label>
+              <input type="text" id="department" name="department">
+            </div>
+            <input type="hidden" name="role" value="technician">
+            <input type="hidden" name="redirect" value="/mobile-standalone.html">
+            <button type="submit">Login as Technician</button>
+          </form>
+        </body>
+        </html>
+      `;
+      
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    }
+  });
+  
+  // Special handler for direct login access
+  app.get("/login", (req, res) => {
+    console.log("Direct login access with query params:", req.query);
+    
+    // Check if user is already authenticated
+    if (req.session.user) {
+      console.log("User already authenticated, redirecting to appropriate page");
+      const role = req.session.user.role;
+      if (role === "admin") {
+        return res.redirect("/dashboard");
+      } else {
+        return res.redirect("/technician");
+      }
+    }
+    
+    // Otherwise, serve the index.html
+    res.sendFile(path.join(process.cwd(), "client", "index.html"));
+  });
+  
+  // Simple login page route - direct HTML with no redirects
+  app.get("/simple-login", (req, res) => {
+    console.log("Serving simple HTML login page...");
+    
+    // Check if user is already authenticated
+    if (req.session.user) {
+      console.log("User already authenticated, redirecting to appropriate page");
+      const role = req.session.user.role;
+      if (role === "admin") {
+        return res.redirect("/dashboard");
+      } else {
+        return res.redirect("/technician");
+      }
+    }
+    
+    const filePath = path.join(process.cwd(), "client", "public", "simple-login.html");
+    if (fs.existsSync(filePath)) {
+      console.log("Simple login file exists, sending...");
+      res.sendFile(filePath);
+    } else {
+      console.log("Simple login file not found, fallback to index.html");
+      res.sendFile(path.join(process.cwd(), "client", "index.html"));
+    }
+  });
+  
+  // Another alias for /simple-login to provide a short url
+  app.get("/s", (req, res) => {
+    res.redirect("/simple-login");
+  });
+  
+  // Direct access to the mobile standalone HTML page for testing
+  app.get("/mobile-app", (req, res) => {
+    console.log("Serving mobile standalone app directly to /mobile-app route...");
+    const filePath = path.join(process.cwd(), "client", "public", "mobile-tech.html");
+    if (fs.existsSync(filePath)) {
+      console.log("Mobile tech file found at", filePath);
+      const resolvedPath = path.resolve(filePath);
+      console.log("Resolved absolute path:", resolvedPath);
+      res.sendFile(resolvedPath);
+    } else {
+      console.error("Mobile tech app not found at", filePath);
+      res.status(404).send("Mobile app not found");
+    }
+  });
+  
+  // New improved mobile technician page
+  app.get("/tech", (req, res) => {
+    console.log("Serving improved mobile tech page...");
+    const filePath = path.join(process.cwd(), "client", "public", "mobile-tech.html");
+    if (fs.existsSync(filePath)) {
+      console.log("Mobile tech file found at", filePath);
+      const resolvedPath = path.resolve(filePath);
+      console.log("Resolved absolute path:", resolvedPath);
+      res.sendFile(resolvedPath);
+    } else {
+      console.error("Mobile tech app not found at", filePath);
+      res.status(404).send("Mobile app not found");
+    }
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+}

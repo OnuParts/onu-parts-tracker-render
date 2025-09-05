@@ -1,0 +1,152 @@
+import XLSX from 'xlsx';
+
+// Proper Excel export function with correct column mapping
+export function generateSimpleExcel(items, month, reportType) {
+  try {
+    console.log(`Generating Excel for ${items?.length || 0} items, ${reportType} report, month ${month}`);
+    
+    // Create a workbook and a worksheet
+    const wb = XLSX.utils.book_new();
+    
+    // Create data rows as arrays
+    const data = [];
+    
+    // Title and empty row
+    data.push([`ONU ${reportType} Report - ${month}`]);
+    data.push([]);
+    
+    // Headers - in EXACT order needed
+    data.push([
+      "Date", 
+      "Part Number", 
+      "Description", 
+      "Quantity", 
+      "Unit Cost", 
+      "Extended Price", 
+      "Building", 
+      "Cost Center", 
+      "Type"
+    ]);
+    
+    // Process each row
+    let totalCost = 0;
+    
+    if (Array.isArray(items)) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item) continue;
+        
+        // Format date
+        let dateStr = '';
+        try {
+          if (item.date) {
+            if (typeof item.date === 'string') {
+              // If already formatted, use it directly
+              dateStr = item.date;
+            } else {
+              // Otherwise format it
+              const date = new Date(item.date);
+              dateStr = `${date.getMonth()+1}/${date.getDate()}/${date.getFullYear()}`;
+            }
+          }
+        } catch (e) {
+          dateStr = String(item.date || '');
+        }
+        
+        // Get price values
+        let unitCost = '';
+        let extPrice = 0;
+        
+        try {
+          if (item.unitCost) {
+            if (typeof item.unitCost === 'string' && item.unitCost.includes('$')) {
+              unitCost = item.unitCost;
+              const numStr = item.unitCost.replace(/[^0-9.-]/g, '');
+              const num = parseFloat(numStr);
+              if (!isNaN(num)) extPrice = num * (item.quantity || 0);
+            } else {
+              const num = parseFloat(item.unitCost);
+              if (!isNaN(num)) {
+                unitCost = '$' + num.toFixed(2);
+                extPrice = num * (item.quantity || 0);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing unit cost:', e);
+        }
+        
+        // Format extended price
+        let extPriceStr = '';
+        try {
+          if (item.extendedPrice) {
+            if (typeof item.extendedPrice === 'string' && item.extendedPrice.includes('$')) {
+              extPriceStr = item.extendedPrice;
+              const numStr = item.extendedPrice.replace(/[^0-9.-]/g, '');
+              extPrice = parseFloat(numStr) || 0;
+            } else {
+              extPrice = parseFloat(item.extendedPrice) || extPrice;
+              extPriceStr = '$' + extPrice.toFixed(2);
+            }
+          } else {
+            extPriceStr = '$' + extPrice.toFixed(2);
+          }
+        } catch (e) {
+          console.error('Error parsing extended price:', e);
+          extPriceStr = '$0.00';
+        }
+        
+        // Add to total
+        totalCost += extPrice;
+        
+        // CRITICAL FIX: Correct column ordering
+        // - part_number should be in the "Part Number" column
+        // - part_name should be in the "Description" column
+        data.push([
+          dateStr,
+          item.partName || '',             // Part Number (correctly mapped)
+          item.description || '',          // Description (correctly mapped)
+          item.quantity || 0,
+          unitCost,
+          extPriceStr,
+          item.building || '',
+          item.costCenter || '',
+          item.type || ''
+        ]);
+      }
+    }
+    
+    // Add total row
+    data.push([]);
+    data.push(['TOTAL', '', '', '', '', '$' + totalCost.toFixed(2)]);
+    
+    // Create worksheet from data
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    
+    // Set column widths
+    ws['!cols'] = [
+      {wch: 12},  // Date
+      {wch: 15},  // Part Number
+      {wch: 30},  // Description
+      {wch: 10},  // Quantity
+      {wch: 12},  // Unit Cost
+      {wch: 15},  // Extended Price
+      {wch: 20},  // Building
+      {wch: 20},  // Cost Center
+      {wch: 15},  // Type
+    ];
+    
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(wb, ws, `${reportType} Report`);
+    
+    // Create file buffer
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    return buffer;
+  } catch (error) {
+    console.error('Excel generation error:', error);
+    throw error;
+  }
+}
+
+// For backwards compatibility
+export default { generateSimpleExcel };
